@@ -1,0 +1,269 @@
+---
+title: ' Satellite Image Classification using Deep Neural Network with Keras in R
+  with GPU Support (Windows 10)'
+author: "Zia Ahmed, PhD, University at Buffalo"
+date: "April 5, 2018"
+output:
+  word_document: default
+  html_document: default
+---
+
+This tutorial  will show how to implement [Deep Neural Network](https://en.wikipedia.org/wiki/Deep_learning) for [pixel based](https://gis.stackexchange.com/questions/237461/distinction-between-pixel-based-and-object-based-classification) [supervised classification ](https://articles.extension.org/pages/40214/whats-the-difference-between-a-supervised-and-unsupervised-image-classification) of [Sentinel-2 multispectral images](https://sentinel.esa.int/web/sentinel/missions/sentinel-2) using [keras](https://keras.rstudio.com/) package in [R](https://cloud.r-project.org/) under [Windows 10](https://www.microsoft.com/en-us/software-download/windows10).
+
+[keras](https://keras.rstudio.com/) is a popular Python package for deep neural networks with multiple backends, including [TensorFlow](https://www.tensorflow.org/), [Microsoft Cognitive Toolkit (CNTK)](https://docs.microsoft.com/en-us/cognitive-toolkit/), and [Theano](http://deeplearning.net/software/theano/). Two R packages allow you  to use [Keras[(https://keras.rstudio.com/)] from R:  [keras](https://keras.rstudio.com/) and  [kerasR](https://github.com/statsmaths/kerasR). The keras package is able to provide a flexible and feature-rich API and can run both [CPU and GUP version of TensorFlow](https://www.tensorflow.org/install/install_windows) in both Windows and Linux.  If you want to run this tutorial with [GUP version of TensorFlow](https://www.tensorflow.org/install/install_windows) you need following prerequisites in your system:   
+
+*[NVIDIA GUP](https://developer.nvidia.com/cuda-gpus): First, you must make sure weather your computer is running with [NVIDIA® GPU](https://developer.nvidia.com/cuda-gpus) or not. Follow the instruction as described  [here](http://nvidia.custhelp.com/app/answers/detail/a_id/2040/~/identifying-the-graphics-card-model-and-device-id-in-a-pc).  
+
+*[CUDA Toolkit v9.0](https://developer.nvidia.com/cuda-90-download-archive?target_os=Windows&target_arch=x86_64&target_version=10&target_type=exelocal): If you have an NVIDIA® GPU in your system, you need to download and install [CUDA Toolkit  v9.0](https://developer.nvidia.com/cuda-90-download-archive?target_os=Windows&target_arch=x86_64&target_version=10&target_type=exelocal). Detail installation steps can be found [here](http://nvidia.custhelp.com/app/answers/detail/a_id/2040/~/identifying-the-graphics-card-model-and-device-id-in-a-pc).
+
+*[cuDNN v7.0](https://developer.nvidia.com/cudnn): The download the zip file version [cuDNN v7.0](https://developer.nvidia.com/cudnn) for your CUDA Toolkit v9.0.You need to extract the zip file and add the location where you extracted it to your system PATH.  Detail installation steps can be found here [here](F:\DeepLearning_tutorial\Satellite_Image_Calssification\h20_R_ImageCalssification\keras_R\Detail installation steps are described here). 
+
+Detail installation steps of Keras backend GPU or CUP version of Tensorflow can be found [here](https://tensorflow.rstudio.com/keras/reference/install_keras.html).
+
+First, we will split "point_data" into a training set (75% of the data), a validation set (12%) and a test set (13%) data.The validation data set will be used to optimize the model parameters during training process.The model's performance will be tested with the data set and then we will predict landuse clasess on grid data set. The point and grid data can be download as [rar](https://www.dropbox.com/s/l94zhzwjrc3lkk7/Point_Grid_Data.rar?dl=0), [7z](https://www.dropbox.com/s/77qk7raj48z0151/Point_Grid_Data.7z?dl=0) and [zip](https://www.dropbox.com/s/007vd9vayn60c2s/Point_Grid_Data.zip?dl=0) format. 
+
+
+```{r}
+start_time <- Sys.time()
+```
+
+#### Import packages
+
+```{r message=F, warning=F}
+library(rgdal)
+library(raster)
+library(dplyr)
+library(RStoolbox)
+library(plyr)
+library(keras)
+library(tfruns)
+library(tfestimators)
+```
+
+#### Setworking directory
+
+```{r}
+setwd("F:\\My_GitHub\\DNN_keras_R")
+```
+
+####  Load data 
+
+```{r}
+point<-read.csv("point_data.csv", header=T)
+grid<-read.csv("grid_data.csv",header=T)
+```
+
+#### Create a data frame and clean the data
+
+```{r}
+point.df<-cbind(point[c(4:13)],Class_ID=point$Class)
+grid.df<-cbind(grid[c(4:13)])
+grid.xy<-grid[c(3,1:2)]
+```
+
+#### Convert Class to dummy variables
+
+```{r}
+point.df[,11] <- as.numeric(point.df[,11]) -1
+```
+
+#### Convert data as matrix
+
+```{r}
+point.df<- as.matrix(point.df)
+grid.df <- as.matrix(grid.df)
+```
+
+#### Set  `dimnames` to `NULL`
+
+```{r}
+dimnames(point.df) <- NULL
+dimnames(grid.df) <- NULL
+```
+
+#### Standardize_the data: ((x-mean(x))/sd(x))
+
+```{r}
+point.df[, 1:10] = scale(point.df[, 1:10])
+grid.df[, 1:10] = scale(grid.df[, 1:10])
+```
+
+### Split data 
+
+```{r}
+##  Determine sample size
+ind <- sample(2, nrow(point.df), replace=TRUE, prob=c(0.80, 0.20))
+# Split the `Split data
+training <- point.df[ind==1, 1:10]
+test <- point.df[ind==2, 1:10]
+# Split the class attribute
+trainingtarget <- point.df[ind==1, 11]
+testtarget <- point.df[ind==2, 11]
+```
+
+#### Hyperparameter flag
+
+```{r}
+FLAGS <- flags(
+  flag_numeric('dropout_1', 0.2, 'First dropout'),
+  flag_numeric('dropout_2', 0.2, 'Second dropout'),
+  flag_numeric('dropout_3', 0.1, 'Third dropout'),
+  flag_numeric('dropout_4', 0.1, 'Forth dropout')
+  )
+```
+
+### Define model parameters with 4 hidden layers with 200 neuron
+
+
+```{r}
+model <- keras_model_sequential()
+model %>% 
+  # Imput layer
+  layer_dense(units = 200, activation = 'relu', 
+              kernel_regularizer =regularizer_l1_l2(l1 = 0.00001, l2 = 0.00001),input_shape = c(10)) %>% 
+  layer_dropout(rate = FLAGS$dropout_1,seed = 1) %>% 
+  # Hidden layers
+  layer_dense(units = 200, activation = 'relu',
+              kernel_regularizer = regularizer_l1_l2(l1 = 0.00001, l2 = 0.00001)) %>%
+  layer_dropout(rate = FLAGS$dropout_2,seed = 1) %>%
+  layer_dense(units = 200, activation = 'relu',
+              kernel_regularizer = regularizer_l1_l2(l1 = 0.00001, l2 = 0.00001)) %>%
+  layer_dropout(rate = FLAGS$dropout_3,seed = 1) %>%
+  layer_dense(units = 200, activation = 'relu',
+              kernel_regularizer = regularizer_l1_l2(l1 = 0.0001, l2 = 0.00001)) %>%
+  layer_dropout(rate = FLAGS$dropout_4) %>%
+  # Output layer
+  layer_dense(units = 5, activation = 'softmax')
+summary(model)
+```
+
+#### Define an optimizer (Stochastic gradient descent optimizer)
+
+```{r}
+optimizer <- optimizer_sgd(lr=0.01)
+```
+
+#### Compile the model
+
+```{r}
+model %>% compile(
+  loss = 'sparse_categorical_crossentropy',
+  optimizer = optimizer,
+  metrics = 'accuracy'
+)
+```
+
+####  Fit the model to the data 
+
+```{r message=F, warning=F}
+history<-model %>% fit(
+  training, trainingtarget, 
+  epochs = 100, 
+  batch_size = 100, 
+  shuffle = TRUE,
+  validation_split = 0.2,
+  callbacks = callback_tensorboard()
+)
+```
+
+### Plot history
+
+```{r}
+plot(history)
+```
+
+#### Evaluate the model
+
+```{r}
+score <- model %>% evaluate(test, testtarget, batch_size = 100)
+cat('Test loss:', score[[1]], '\n')
+cat('Test accuracy:', score[[2]], '\n')
+```
+
+#### Prediction & confusion matrix - test data
+
+```{r}
+class.test <- model %>%
+  predict_classes(test, batch_size = 100)
+# Confusion matrix
+table(testtarget,class.test)
+```
+
+#### Predicted Class Probability
+
+```{r}
+prob.test <- model %>%
+  predict_proba(test, batch_size = 100)
+```
+
+#### Prediction at grid locations
+
+```{r}
+Class.grid <- model %>%
+  predict_classes(grid.df, batch_size = 100)
+```
+
+#### Detach keras, tfruns, tftestimators
+
+```{r}
+detach(package:keras, unload=TRUE)
+detach(package:tfruns, unload=TRUE)
+detach(package:tfestimators, unload=TRUE)
+```
+
+#### Change column name
+
+```{r}
+class<-as.data.frame(Class.grid)
+new.grid<-cbind(x=grid.xy$x, y=grid.xy$y,Class_ID=class )
+names(new.grid)
+colnames(new.grid)[3]<-"Class_ID"
+new.grid.na<-na.omit(new.grid)
+```
+
+#### Load landuse ID file
+
+```{r}
+#### Join Class Id Column
+ID<-read.csv("Landuse_ID_keras.csv", header=TRUE)
+ID
+```
+
+#### Convert to raster
+
+```{r message=F, warning=F}
+#### Convert to raster
+x<-SpatialPointsDataFrame(as.data.frame(new.grid.na)[, c("x", "y")], data = new.grid.na)
+r <- rasterFromXYZ(as.data.frame(x)[, c("x", "y", "Class_ID")])
+
+myPalette <- colorRampPalette(c("darkgoldenrod1","red", "darkgreen","green", "blue"))
+spplot(r,"Class_ID",  
+      colorkey = list(space="right",tick.number=1,height=1, width=1.5,
+              labels = list(at = seq(0,3.8,length=5),cex=1.0,
+              lab = c("Class-1 (Road/parking/pavement)" ,"Class-2 (Building)", "Class-3 (Tree/buses)", "Class-4 (Grass)", "Class-5 (Water)"))),
+              col.regions=myPalette,cut=4)
+writeRaster(r,"predicted_Landuse.tiff","GTiff",overwrite=TRUE)
+
+```
+
+#### Run time
+
+```{r}
+end_time <- Sys.time()
+end_time - start_time
+```
+
+
+### Conclusions
+
+This simple pixel-based satellite image classification algorithm with deep neural network in R with keras able to identify urban objects with high accuracy. It may be use full for landuse classification for urban environment monitoring as well as planning purpose.  Also, may use full for agricultural landuse classification. 
+
+
+#### Clean everyrhing
+
+```{r}
+gc()
+```
+
+
+
